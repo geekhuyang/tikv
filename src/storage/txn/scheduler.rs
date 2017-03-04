@@ -43,7 +43,8 @@ use storage::{Engine, Command, Snapshot, StorageCb, Result as StorageResult,
               Error as StorageError, ScanMode};
 use storage::mvcc::{MvccTxn, ScanMetrics, MvccReader, Error as MvccError, MAX_TXN_WRITE_SIZE};
 use storage::{Key, Value, KvPair, CMD_TAG_GC};
-use storage::engine::{CbContext, Result as EngineResult, Callback as EngineCallback, Modify};
+use storage::engine::{CbContext, Result as EngineResult, Callback as EngineCallback, Modify,
+                      IterOption};
 use util::transport::{SendCh, Error as TransportError};
 use util::{SlowTimer, HashMap};
 
@@ -52,6 +53,7 @@ use super::Error;
 use super::store::SnapshotStore;
 use super::latch::{Latches, Lock};
 use super::super::metrics::*;
+use super::super::super::raftstore::store::engine::IterOption;
 
 // TODO: make it configurable.
 pub const GC_BATCH_SIZE: usize = 512;
@@ -411,6 +413,25 @@ fn process_read(cid: u64, mut cmd: Command, ch: SendCh<Msg>, snapshot: Box<Snaps
             match snapshot.get(key) {
                 Ok(val) => ProcessResult::Value { value: val },
                 Err(e) => ProcessResult::Failed { err: StorageError::from(e) },
+            }
+        }
+        Command::RawScan { ref start_key, ref end_key, limit, .. } => {
+            let mut pairs = vec![];
+            let mut key = start_key;
+            let mut cursor = snapshot.iter(IterOption::Default(), ScanMode::Forward).unwrap();
+            match cursor.seek(key) {
+                Err(e) => panic!(e),
+                Ok(false) => ProcessResult::MultiKvpairs { pairs: pairs },
+                Ok(true) => {
+                    while pairs.len() < limit as usize {
+                        if !cursor.valid() {
+                            break;
+                        }
+                        pairs.push(try!(cursor.key().raw()), cursor.value());
+                        cursor.next();
+                    }
+                    ProcessResult::MultiKvpairs { pairs: pairs }
+                }
             }
         }
         _ => panic!("unsupported read command"),
